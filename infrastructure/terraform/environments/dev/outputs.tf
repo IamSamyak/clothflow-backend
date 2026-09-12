@@ -75,3 +75,8 @@ output "grafana_target_group_arn" {
   description = "Grafana ALB target group ARN"
   value       = module.alb.grafana_target_group_arn
 }
+
+output "github_actions_role_arn" {
+  description = "IAM role ARN for GitHub Actions OIDC"
+  value       = module.github_actions.github_actions_role_arn
+}

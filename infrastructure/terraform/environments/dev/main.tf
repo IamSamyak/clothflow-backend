@@ -358,3 +358,17 @@ resource "aws_secretsmanager_secret" "grafana_admin" {
     Purpose     = "grafana-admin-credentials"
   }
 }
+
+module "github_actions" {
+  source = "../../modules/github-actions"
+
+  github_repository = "IamSamyak/clothflow-backend"
+  github_branch     = "main"
+  environment       = "dev"
+
+  ecs_execution_role_arn = module.iam.ecs_execution_role_arn
+
+  ecs_task_role_arns = [
+    module.iam.ecs_task_role_arn
+  ]
+}
