@@ -1,4 +1,4 @@
-name: ClothFlow Docker Build and ECR Push
+name: ClothFlow Docker Build, ECR Push and ECS Deploy
 
 on:
   push:
@@ -14,7 +14,7 @@ env:
 jobs:
 
   # ============================================================
-  # Detect which microservices changed
+  # Detect which application services changed
   # ============================================================
   detect-changes:
     name: Detect changed services
@@ -54,11 +54,13 @@ jobs:
             notification:
               - 'notification-service/**'
 
+            infrastructure:
+              - 'infrastructure/**'
+
       - name: Build service matrix
         id: services
         shell: bash
         run: |
-
           services=()
 
           if [[ "${{ steps.filter.outputs.product }}" == "true" ]]; then
@@ -91,7 +93,14 @@ jobs:
 
           if [[ ${#services[@]} -eq 0 ]]; then
             echo 'services=[]' >> "$GITHUB_OUTPUT"
-            echo "No service changes detected."
+
+            if [[ "${{ steps.filter.outputs.infrastructure }}" == "true" ]]; then
+              echo "Infrastructure-only changes detected."
+              echo "Docker/ECR/ECS deployment is not required."
+            else
+              echo "No application service changes detected."
+            fi
+
             exit 0
           fi
 
@@ -99,16 +108,18 @@ jobs:
 
           echo "services=$json" >> "$GITHUB_OUTPUT"
 
-          echo "Changed services:"
+          echo "Changed application services:"
           echo "$json"
 
 
   # ============================================================
-  # Build + Push changed services
+  # Build Docker images and publish them to ECR
   # ============================================================
   docker-ecr:
     name: Docker → ECR
-    needs: detect-changes
+
+    needs:
+      - detect-changes
 
     if: needs.detect-changes.outputs.services != '[]'
 
@@ -127,7 +138,7 @@ jobs:
     steps:
 
       # --------------------------------------------------------
-      # Checkout
+      # Checkout repository
       # --------------------------------------------------------
       - name: Checkout repository
         uses: actions/checkout@v4
@@ -161,7 +172,6 @@ jobs:
         working-directory: ${{ matrix.service }}
         shell: bash
         run: |
-
           VERSION=$(./mvnw -q \
             -Dexpression=project.version \
             -DforceStdout \
@@ -170,13 +180,11 @@ jobs:
           echo "Service: ${{ matrix.service }}"
           echo "Version: $VERSION"
 
-          # No SNAPSHOT releases
           if [[ "$VERSION" == *"-SNAPSHOT" ]]; then
             echo "::error::SNAPSHOT versions are not allowed for ECR releases."
             exit 1
           fi
 
-          # Enforce MAJOR.MINOR.PATCH
           if [[ ! "$VERSION" =~ ^[0-9]+\.[0-9]+\.[0-9]+$ ]]; then
             echo "::error::Invalid release version: $VERSION"
             echo "::error::Expected MAJOR.MINOR.PATCH"
@@ -203,7 +211,6 @@ jobs:
         id: account
         shell: bash
         run: |
-
           ACCOUNT_ID=$(aws sts get-caller-identity \
             --query Account \
             --output text)
@@ -214,7 +221,7 @@ jobs:
 
 
       # --------------------------------------------------------
-      # Login to ECR
+      # Login to Amazon ECR
       # --------------------------------------------------------
       - name: Login to Amazon ECR
         id: ecr-login
@@ -228,7 +235,6 @@ jobs:
         id: ecr
         shell: bash
         run: |
-
           REPOSITORY="clothflow/${{ matrix.service }}"
 
           echo "Repository: $REPOSITORY"
@@ -249,8 +255,8 @@ jobs:
           VERSION: ${{ steps.version.outputs.version }}
           REPOSITORY: ${{ steps.ecr.outputs.repository }}
         run: |
-
-          echo "Checking ECR tag: $VERSION"
+          echo "Checking ECR tag:"
+          echo "$REPOSITORY:$VERSION"
 
           if aws ecr describe-images \
             --repository-name "$REPOSITORY" \
@@ -260,7 +266,6 @@ jobs:
 
             echo "::error::ECR tag $VERSION already exists in $REPOSITORY."
             echo "::error::Immutable release policy prevents tag reuse."
-
             exit 1
           fi
 
@@ -277,7 +282,6 @@ jobs:
           REPOSITORY: ${{ steps.ecr.outputs.repository }}
           VERSION: ${{ steps.version.outputs.version }}
         run: |
-
           IMAGE="$REGISTRY/$REPOSITORY:$VERSION"
 
           echo "Building:"
@@ -297,7 +301,6 @@ jobs:
           REPOSITORY: ${{ steps.ecr.outputs.repository }}
           VERSION: ${{ steps.version.outputs.version }}
         run: |
-
           IMAGE="$REGISTRY/$REPOSITORY:$VERSION"
 
           echo "Pushing:"
@@ -314,6 +317,190 @@ jobs:
           REPOSITORY: ${{ steps.ecr.outputs.repository }}
           VERSION: ${{ steps.version.outputs.version }}
         run: |
+          aws ecr describe-images \
+            --repository-name "$REPOSITORY" \
+            --image-ids imageTag="$VERSION" \
+            --region "$AWS_REGION" \
+            --query 'imageDetails[0].{digest:imageDigest,tags:imageTags,pushed:imagePushedAt}' \
+            --output table
+
+
+  # ============================================================
+  # Deploy successfully published images to ECS
+  # ============================================================
+  deploy-ecs:
+    name: Deploy changed services to ECS
+
+    needs:
+      - detect-changes
+      - docker-ecr
+
+    if: >
+      needs.detect-changes.outputs.services != '[]' &&
+      needs.docker-ecr.result == 'success'
+
+    runs-on: ubuntu-latest
+
+    strategy:
+      fail-fast: false
+
+      matrix:
+        service: ${{ fromJson(needs.detect-changes.outputs.services) }}
+
+    permissions:
+      contents: read
+      id-token: write
+
+    env:
+      AWS_REGION: us-east-1
+      ECS_CLUSTER: clothflow
+
+    steps:
+
+      # --------------------------------------------------------
+      # Checkout repository
+      # --------------------------------------------------------
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+
+      # --------------------------------------------------------
+      # Authenticate GitHub → AWS using OIDC
+      # --------------------------------------------------------
+      - name: Configure AWS credentials
+        uses: aws-actions/configure-aws-credentials@v5
+        with:
+          role-to-assume: ${{ vars.AWS_GITHUB_ACTIONS_ROLE_ARN }}
+          aws-region: ${{ env.AWS_REGION }}
+
+
+      # --------------------------------------------------------
+      # Resolve ECS configuration
+      # --------------------------------------------------------
+      - name: Resolve ECS configuration
+        id: config
+        shell: bash
+        run: |
+          case "${{ matrix.service }}" in
+
+            product-service)
+              ECS_SERVICE="clothflow-product-service"
+              TASK_FAMILY="clothflow-product-service"
+              CONTAINER_NAME="product-service"
+              ;;
+
+            user-service)
+              ECS_SERVICE="clothflow-user-service"
+              TASK_FAMILY="clothflow-user-service"
+              CONTAINER_NAME="user-service"
+              ;;
+
+            inventory-service)
+              ECS_SERVICE="clothflow-inventory-service"
+              TASK_FAMILY="clothflow-inventory-service"
+              CONTAINER_NAME="inventory-service"
+              ;;
+
+            order-service)
+              ECS_SERVICE="clothflow-order-service"
+              TASK_FAMILY="clothflow-order-service"
+              CONTAINER_NAME="order-service"
+              ;;
+
+            payment-service)
+              ECS_SERVICE="clothflow-payment-service"
+              TASK_FAMILY="clothflow-payment-service"
+              CONTAINER_NAME="payment-service"
+              ;;
+
+            shipping-service)
+              ECS_SERVICE="clothflow-shipping-service"
+              TASK_FAMILY="clothflow-shipping-service"
+              CONTAINER_NAME="shipping-service"
+              ;;
+
+            notification-service)
+              ECS_SERVICE="clothflow-notification-service"
+              TASK_FAMILY="clothflow-notification-service"
+              CONTAINER_NAME="notification-service"
+              ;;
+
+            *)
+              echo "::error::Unknown service: ${{ matrix.service }}"
+              exit 1
+              ;;
+          esac
+
+          echo "ECS service: $ECS_SERVICE"
+          echo "Task family: $TASK_FAMILY"
+          echo "Container: $CONTAINER_NAME"
+
+          echo "ecs_service=$ECS_SERVICE" >> "$GITHUB_OUTPUT"
+          echo "task_family=$TASK_FAMILY" >> "$GITHUB_OUTPUT"
+          echo "container_name=$CONTAINER_NAME" >> "$GITHUB_OUTPUT"
+
+
+      # --------------------------------------------------------
+      # Read application version
+      # --------------------------------------------------------
+      - name: Read application version
+        id: version
+        working-directory: ${{ matrix.service }}
+        shell: bash
+        run: |
+          VERSION=$(./mvnw -q \
+            -Dexpression=project.version \
+            -DforceStdout \
+            help:evaluate)
+
+          echo "Application version: $VERSION"
+
+          if [[ "$VERSION" == *"-SNAPSHOT" ]]; then
+            echo "::error::SNAPSHOT version cannot be deployed."
+            exit 1
+          fi
+
+          if [[ ! "$VERSION" =~ ^[0-9]+\.[0-9]+\.[0-9]+$ ]]; then
+            echo "::error::Invalid release version: $VERSION"
+            exit 1
+          fi
+
+          echo "version=$VERSION" >> "$GITHUB_OUTPUT"
+
+
+      # --------------------------------------------------------
+      # Resolve ECR image
+      # --------------------------------------------------------
+      - name: Resolve ECR image
+        id: image
+        shell: bash
+        env:
+          VERSION: ${{ steps.version.outputs.version }}
+        run: |
+          ACCOUNT_ID=$(aws sts get-caller-identity \
+            --query Account \
+            --output text)
+
+          REGISTRY="${ACCOUNT_ID}.dkr.ecr.${AWS_REGION}.amazonaws.com"
+
+          IMAGE="${REGISTRY}/clothflow/${{ matrix.service }}:${VERSION}"
+
+          echo "Deployment image:"
+          echo "$IMAGE"
+
+          echo "image=$IMAGE" >> "$GITHUB_OUTPUT"
+
+
+      # --------------------------------------------------------
+      # Verify ECR image
+      # --------------------------------------------------------
+      - name: Verify ECR image
+        env:
+          VERSION: ${{ steps.version.outputs.version }}
+          REPOSITORY: clothflow/${{ matrix.service }}
+        run: |
+          echo "Verifying:"
+          echo "$REPOSITORY:$VERSION"
 
           aws ecr describe-images \
             --repository-name "$REPOSITORY" \
@@ -321,3 +508,58 @@ jobs:
             --region "$AWS_REGION" \
             --query 'imageDetails[0].{digest:imageDigest,tags:imageTags,pushed:imagePushedAt}' \
             --output table
+
+
+      # --------------------------------------------------------
+      # Download current ECS task definition
+      # --------------------------------------------------------
+      - name: Download current ECS task definition
+        env:
+          TASK_FAMILY: ${{ steps.config.outputs.task_family }}
+        run: |
+          aws ecs describe-task-definition \
+            --task-definition "$TASK_FAMILY" \
+            --region "$AWS_REGION" \
+            --query taskDefinition \
+            --output json > task-definition.json
+
+          echo "Current task definition downloaded."
+
+
+      # --------------------------------------------------------
+      # Render new ECS task definition
+      # --------------------------------------------------------
+      - name: Render new task definition
+        id: render
+        uses: aws-actions/amazon-ecs-render-task-definition@v1
+        with:
+          task-definition: task-definition.json
+          container-name: ${{ steps.config.outputs.container_name }}
+          image: ${{ steps.image.outputs.image }}
+
+
+      # --------------------------------------------------------
+      # Deploy ECS service
+      # --------------------------------------------------------
+      - name: Deploy ECS service
+        uses: aws-actions/amazon-ecs-deploy-task-definition@v2
+        with:
+          task-definition: ${{ steps.render.outputs.task-definition }}
+          service: ${{ steps.config.outputs.ecs_service }}
+          cluster: ${{ env.ECS_CLUSTER }}
+          wait-for-service-stability: true
+
+
+      # --------------------------------------------------------
+      # Deployment summary
+      # --------------------------------------------------------
+      - name: Deployment summary
+        run: |
+          echo "=========================================="
+          echo "ECS deployment successful"
+          echo "=========================================="
+          echo "Service:  ${{ matrix.service }}"
+          echo "Version:  ${{ steps.version.outputs.version }}"
+          echo "ECS:      ${{ steps.config.outputs.ecs_service }}"
+          echo "Task:     ${{ steps.config.outputs.task_family }}"
+          echo "=========================================="
