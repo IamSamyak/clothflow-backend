@@ -1,0 +1,19 @@
+apiVersion: 1
+
+providers:
+
+  - name: ClothFlow
+    orgId: 1
+
+    folder: ClothFlow
+
+    type: file
+
+    disableDeletion: true
+    editable: false
+
+    updateIntervalSeconds: 30
+
+    options:
+      path: /etc/grafana/provisioning/dashboards
+      foldersFromFilesStructure: false

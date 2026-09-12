@@ -1,0 +1,62 @@
+global:
+  scrape_interval: 15s
+  evaluation_interval: 15s
+
+scrape_configs:
+
+  - job_name: clothflow-services
+
+    docker_sd_configs:
+      - host: unix:///var/run/docker.sock
+        refresh_interval: 15s
+
+    relabel_configs:
+
+      # ------------------------------------------------------------
+      # Keep only the seven ClothFlow application containers.
+      # Ignore FLOCI, PostgreSQL, Kafka, Redis, Prometheus, etc.
+      # ------------------------------------------------------------
+      - source_labels:
+          - __meta_docker_container_name
+        regex: "/?floci-ecs-[0-9a-f]+-(product-service|user-service|inventory-service|order-service|payment-service|shipping-service|notification-service)"
+        action: keep
+
+      # ------------------------------------------------------------
+      # Keep only application HTTP ports.
+      #
+      # Product       -> 8080
+      # User          -> 8081
+      # Inventory     -> 8082
+      # Order         -> 8083
+      # Payment       -> 8084
+      # Shipping      -> 8085
+      # Notification  -> 8086
+      # ------------------------------------------------------------
+      - source_labels:
+          - __meta_docker_port_private
+        regex: "808[0-6]"
+        action: keep
+
+      # ------------------------------------------------------------
+      # Extract service name from the ECS task container name.
+      # ------------------------------------------------------------
+      - source_labels:
+          - __meta_docker_container_name
+        regex: "/?floci-ecs-[0-9a-f]+-(.*)"
+        target_label: service
+        replacement: "$1"
+
+      # ------------------------------------------------------------
+      # Use service name as Prometheus job label.
+      # ------------------------------------------------------------
+      - source_labels:
+          - __meta_docker_container_name
+        regex: "/?floci-ecs-[0-9a-f]+-(.*)"
+        target_label: job
+        replacement: "$1"
+
+      # ------------------------------------------------------------
+      # Spring Boot Actuator Prometheus endpoint.
+      # ------------------------------------------------------------
+      - target_label: __metrics_path__
+        replacement: /actuator/prometheus

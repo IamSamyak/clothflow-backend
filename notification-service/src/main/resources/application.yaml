@@ -1,0 +1,111 @@
+server:
+  port: ${SERVER_PORT:8086}
+  shutdown: graceful
+
+
+spring:
+  application:
+    name: notification-service
+
+  datasource:
+    url: ${SPRING_DATASOURCE_URL:jdbc:postgresql://localhost:7001/clothflow_notification}
+    username: ${SPRING_DATASOURCE_USERNAME:clothflow_admin}
+    password: ${SPRING_DATASOURCE_PASSWORD:floci-6201e1f5cf524b379ec1907e17e56d45}
+
+    hikari:
+      pool-name: NotificationHikariPool
+      maximum-pool-size: 10
+      minimum-idle: 2
+      connection-timeout: 30000
+      validation-timeout: 5000
+      idle-timeout: 600000
+      max-lifetime: 1800000
+
+  jpa:
+    hibernate:
+      ddl-auto: validate
+    open-in-view: false
+    properties:
+      hibernate:
+        format_sql: true
+
+  flyway:
+    enabled: true
+    locations: classpath:db/migration
+
+  kafka:
+    bootstrap-servers: ${SPRING_KAFKA_BOOTSTRAP_SERVERS:localhost:9092}
+
+    consumer:
+      group-id: ${SPRING_KAFKA_CONSUMER_GROUP_ID:clothflow-notification-service}
+      auto-offset-reset: earliest
+      enable-auto-commit: false
+
+      key-deserializer: org.apache.kafka.common.serialization.StringDeserializer
+      value-deserializer: org.apache.kafka.common.serialization.StringDeserializer
+
+    listener:
+      ack-mode: manual
+
+    producer:
+      acks: all
+      enable-idempotence: true
+      retries: 10
+
+
+notification:
+  delivery:
+    batch-size: 20
+    lease-seconds: 60
+    max-retries: 5
+    scheduler-delay-ms: 5000
+    worker-threads: 5
+
+    retry-backoff:
+      first-retry-seconds: 10
+      second-retry-seconds: 30
+      third-retry-seconds: 60
+      fourth-retry-seconds: 300
+      subsequent-retry-seconds: 600
+
+  recovery:
+    scheduler-delay-ms: 10000
+
+  retention:
+    password-reset-days: ${PASSWORD_RESET_NOTIFICATION_RETENTION_DAYS:1}
+    fixed-delay: ${PASSWORD_RESET_NOTIFICATION_RETENTION_FIXED_DELAY:3600000}
+
+
+management:
+  endpoints:
+    web:
+      exposure:
+        include: health,info,prometheus
+
+  endpoint:
+    health:
+      probes:
+        enabled: true
+      show-details: when_authorized
+
+  health:
+    livenessstate:
+      enabled: true
+    readinessstate:
+      enabled: true
+
+  metrics:
+    tags:
+      application: ${spring.application.name}
+
+
+info:
+  app:
+    name: ${spring.application.name}
+    description: ClothFlow Notification Service
+    version: ${APP_VERSION:0.0.1}
+
+
+logging:
+  pattern:
+    console: "%d{yyyy-MM-dd'T'HH:mm:ss.SSSXXX} %-5level [%X{correlationId:-}] %logger{36} - %msg%n"

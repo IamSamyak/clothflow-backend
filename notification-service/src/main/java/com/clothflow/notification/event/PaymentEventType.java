@@ -1,0 +1,8 @@
+package com.clothflow.notification.event;
+
+public enum PaymentEventType {
+
+    PAYMENT_SUCCEEDED,
+
+    PAYMENT_REFUNDED
+}

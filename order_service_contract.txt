@@ -1,0 +1,545 @@
+I am continuing my ClothFlow backend project.
+
+ClothFlow is a production-style clothing-store microservices project built for senior-level Spring Boot, microservices, distributed-systems, AWS, and system-design learning.
+
+IMPORTANT:
+
+* Continue from the current state.
+* Do NOT restart the project.
+* Do NOT rebuild completed work unnecessarily.
+* If something is broken, inspect the current implementation and fix it rather than replacing the architecture blindly.
+* I use IntelliJ, Java 21, Spring Boot 4.1.1, PostgreSQL 16, Flyway 12.4.0.
+* We use database-per-service.
+* `open-in-view=false` is intentional.
+* I prefer sequential implementation and will say `next` to continue.
+
+## ClothFlow services currently
+
+Product Service:
+
+* Port: 8081
+* Database: `clothflow`
+* Status: baseline complete
+
+Inventory Service:
+
+* Port: 8082
+* Database: `clothflow_inventory`
+* Status: baseline complete
+
+Order Service:
+
+* Port: 8083
+* Database: `clothflow_order`
+* Status: baseline complete enough to proceed, but NOT production-final
+* Payment Service is the next major service.
+
+## Order Service current architecture
+
+Order Service owns:
+
+* Orders
+* Order items
+* Order status history
+* Order-side inventory reservation records
+
+It does NOT access Product or Inventory databases directly.
+
+Communication:
+
+Order Service
+|
++---- HTTP ----> Product Service
+|
++---- HTTP ----> Inventory Service
+
+Product information is copied into `OrderItem` as a snapshot:
+
+* productId
+* sku
+* productName
+* unitPrice
+* quantity
+* subtotal
+
+## Order status
+
+Current enum:
+
+PENDING
+INVENTORY_RESERVED
+PAYMENT_PENDING
+CONFIRMED
+PROCESSING
+SHIPPED
+DELIVERED
+CANCELLED
+INVENTORY_FAILED
+PAYMENT_FAILED
+
+Important transitions:
+
+PENDING
+-> INVENTORY_RESERVED
+-> INVENTORY_FAILED
+-> CANCELLED
+
+INVENTORY_RESERVED
+-> PAYMENT_PENDING
+-> CANCELLED
+
+PAYMENT_PENDING
+-> CONFIRMED
+-> PAYMENT_FAILED
+-> CANCELLED
+
+CONFIRMED
+-> PROCESSING
+-> CANCELLED
+
+PROCESSING
+-> SHIPPED
+
+SHIPPED
+-> DELIVERED
+
+Terminal:
+
+* DELIVERED
+* CANCELLED
+* INVENTORY_FAILED
+* PAYMENT_FAILED
+
+The status transition rules are handled by `OrderStatusTransitionService`.
+
+## Order database
+
+Current Flyway migrations include:
+
+V1__...
+
+* `orders`
+* `order_items`
+* `order_status_history`
+
+V2__...
+
+* `order_inventory_reservations`
+
+V3__...
+
+* expanded reservation status constraint to include `COMMITTED`
+
+Current reservation statuses:
+
+PENDING
+RESERVED
+COMMITTED
+RELEASED
+FAILED
+RELEASE_FAILED
+
+Important:
+A previous Flyway problem occurred because V3 was missing `.sql`. It has already been fixed.
+
+## Order inventory reservation
+
+`OrderInventoryReservation` contains:
+
+* id
+* order
+* orderItem
+* reservationId
+* productId
+* quantity
+* status
+* createdAt
+* updatedAt
+
+Database constraints include:
+
+* unique reservationId
+* unique orderItemId
+* quantity > 0
+
+The `reservationId` is stable and is used for Inventory idempotency.
+
+## Order -> Product integration
+
+This is COMPLETE and TESTED.
+
+Order uses Spring `RestClient`.
+
+Product Service endpoint:
+
+GET `/api/v1/products/{productId}`
+
+Product data is retrieved remotely and stored as a snapshot in OrderItem.
+
+Do NOT introduce direct Product DB access.
+
+## Order -> Inventory integration
+
+This is COMPLETE and TESTED.
+
+Order uses an `InventoryClient` abstraction and `InventoryServiceClient`.
+
+Methods:
+
+reserve(
+UUID productId,
+UUID reservationId,
+int quantity
+)
+
+release(
+UUID productId,
+UUID reservationId,
+int quantity
+)
+
+commit(
+UUID productId,
+UUID reservationId,
+int quantity
+)
+
+Inventory endpoints:
+
+POST `/api/v1/inventory/{productId}/reservations`
+
+POST `/api/v1/inventory/{productId}/reservations/release`
+
+POST `/api/v1/inventory/{productId}/reservations/commit`
+
+Inventory owns the actual stock.
+
+Order only coordinates reservations.
+
+## Successful Order test
+
+A real order successfully reached:
+
+```text
+PENDING
+    ↓
+Inventory reserve
+    ↓
+INVENTORY_RESERVED
+```
+
+Successful order:
+
+orderId:
+`345fdc2f-2200-44e5-a879-e0ec3d5e4475`
+
+orderNumber:
+`CF-62934ABC`
+
+customerId:
+`11111111-1111-1111-1111-111111111111`
+
+Product:
+Red Cotton Kurti
+
+productId:
+`e197ce1d-60f0-4efc-a9dd-b9241dce1e40`
+
+SKU:
+`KURTI-RED-M`
+
+quantity:
+2
+
+unit price:
+899
+
+total:
+1798 INR
+
+Final successful state:
+
+`INVENTORY_RESERVED`
+
+This proves:
+
+* Order creation works
+* Product HTTP integration works
+* Product snapshot works
+* Total calculation works
+* Inventory reservation works
+* Order reservation persistence works
+* Transaction boundaries work
+* Response mapping works
+
+## Inventory test data
+
+Products:
+
+Printed Cotton Dupatta
+
+* productId: `60e160fa-610c-4763-98d1-8cce4d5d1995`
+* price: ₹499
+* stock: 3
+
+Blue Rayon Kurti
+
+* productId: `305ddba0-ee0c-4995-8f86-070b0d388737`
+* price: ₹1299
+* stock: 10
+
+Floral Anarkali Dress
+
+* productId: `c2e185e5-b15b-43b0-b2e2-4196070bcf9e`
+* price: ₹1899
+* stock: 5
+
+Black Palazzo Pants
+
+* productId: `e1278894-c2d6-4b28-92f6-5f30a47bc418`
+* price: ₹799
+* stock: 50
+
+Red Cotton Kurti
+
+* productId: `e197ce1d-60f0-4efc-a9dd-b9241dce1e40`
+* price: ₹899
+* stock: 20
+
+## Important Hibernate/transaction issue already fixed
+
+We encountered:
+
+`LazyInitializationException` for `Order.statusHistory`.
+
+Cause:
+
+* `@Transactional` methods were being called from the same `OrderService`
+* Spring self-invocation bypassed the transactional proxy
+* LAZY collections were accessed without an active Hibernate session
+
+We fixed this by moving transactional state-changing operations into:
+
+`OrderStatePersistenceService`
+
+Do NOT solve this by:
+
+* changing LAZY to EAGER
+* enabling Open Session in View
+
+Keep:
+
+```yaml
+spring:
+  jpa:
+    open-in-view: false
+```
+
+We then encountered the same issue with:
+
+`Order.items`
+
+The correct fix was to create:
+
+`OrderReadService`
+
+This service owns transactional reads and response mapping.
+
+OrderService delegates:
+
+```java
+return orderReadService.getOrder(orderId);
+```
+
+and:
+
+```java
+return orderReadService.getOrder(orderId, customerId);
+```
+
+This ensures `Order.items` is initialized inside a real transaction.
+
+## Current service responsibilities
+
+`OrderService`
+
+* business orchestration
+* coordinates Product/Inventory
+* creates order workflow
+* compensation
+* cancellation
+* delegates transactional persistence
+* delegates transactional reads
+
+`OrderCreationPersistenceService`
+
+* transactional creation of PENDING Order
+* calls ProductClient during creation
+* creates OrderItems
+* calculates total
+* creates OrderInventoryReservation records
+
+`OrderStatePersistenceService`
+
+* transactional order state changes
+* reservation state changes
+* order status history
+* inventory reservation success/failure
+* payment-pending transition
+* order confirmation
+
+It currently needs/contains methods such as:
+
+```text
+markReservationReserved()
+markReservationReleased()
+markReservationReleaseFailed()
+markReservationCommitted()
+markInventoryReserved()
+markInventoryFailed()
+cancelOrderWithoutInventory()
+markPaymentPending()
+updateStatus()
+markOrderConfirmed()
+```
+
+`OrderReadService`
+
+* transactional order reads
+* maps Order -> OrderResponse
+* initializes lazy Order.items safely
+
+## Current business flow
+
+Current synchronous baseline:
+
+```text
+Create Order
+    |
+    v
+Create PENDING Order
+    |
+    v
+Get product information from Product Service
+    |
+    v
+Create OrderItem snapshots
+    |
+    v
+Create inventory reservation records
+    |
+    v
+Reserve inventory through Inventory Service
+    |
+    +---- failure ----> compensate previous reservations
+    |
+    v
+Mark reservations RESERVED
+    |
+    v
+Mark Order INVENTORY_RESERVED
+    |
+    v
+PAYMENT_PENDING
+    |
+    v
+Payment succeeds
+    |
+    v
+Commit inventory
+    |
+    v
+CONFIRMED
+```
+
+## Important distributed-systems caveat
+
+The current implementation is intentionally a synchronous baseline.
+
+Example:
+
+```text
+Order has 3 items
+
+Inventory commit item A -> success
+Inventory commit item B -> success
+Inventory commit item C -> timeout
+```
+
+The system can have partial progress.
+
+Stable reservation IDs make retries safer because Inventory operations are idempotent.
+
+Later we must solve this properly using:
+
+* Kafka
+* Transactional Outbox
+* Saga
+* retries
+* dead-letter/failure handling
+* event-driven state transitions
+
+Do NOT pretend the current synchronous workflow is a distributed transaction.
+
+## What is NOT complete in Order Service
+
+Still to be hardened later:
+
+* Payment Service integration
+* Payment failure compensation
+* Kafka events
+* Transactional Outbox integration
+* Saga orchestration
+* stronger idempotency at workflow level
+* retry semantics
+* timeout handling
+* circuit breaker
+* distributed tracing
+* integration tests
+* concurrency tests
+* production observability
+* final cancellation/refund rules
+* security/auth integration
+
+## Current direction
+
+We should NOT spend many more steps polishing Order Service in isolation.
+
+Next major milestone:
+
+Build Payment Service.
+
+Payment Service:
+
+* port 8084
+* database `clothflow_payment`
+* database-per-service
+* no direct access to `clothflow_order`
+* Payment state machine
+* idempotent payment creation
+* payment gateway abstraction
+* fake gateway for local testing
+* later real provider integration
+* eventually Payment events + Outbox + Saga
+
+After Payment Service is built, connect:
+
+```text
+Order
+  ↓
+Inventory Reservation
+  ↓
+PAYMENT_PENDING
+  ↓
+Payment Service
+  ↓
+Payment Success
+  ↓
+Inventory Commit
+  ↓
+CONFIRMED
+```
+
+After all services are built, return to Order Service for final production hardening.
+
+When I say `next`, continue from this exact state.

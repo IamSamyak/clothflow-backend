@@ -1,0 +1,79 @@
+spring:
+  application:
+    name: inventory-service
+
+  lifecycle:
+    timeout-per-shutdown-phase: 30s
+
+  security:
+    oauth2:
+      resourceserver:
+        jwt:
+          jwk-set-uri: ${JWT_JWK_SET_URI:http://floci:8081/.well-known/jwks.json}
+          issuer-uri: ${JWT_ISSUER:clothflow-user-service}
+
+  datasource:
+    url: ${SPRING_DATASOURCE_URL:jdbc:postgresql://localhost:7001/clothflow_inventory}
+    username: ${SPRING_DATASOURCE_USERNAME:clothflow_admin}
+    password: ${SPRING_DATASOURCE_PASSWORD:local-password}
+    driver-class-name: org.postgresql.Driver
+
+    hikari:
+      pool-name: InventoryHikariPool
+      maximum-pool-size: 10
+      minimum-idle: 2
+      connection-timeout: 30000
+      validation-timeout: 5000
+      idle-timeout: 600000
+      max-lifetime: 1800000
+
+  jpa:
+    hibernate:
+      ddl-auto: validate
+    open-in-view: false
+    properties:
+      hibernate:
+        format_sql: true
+
+  flyway:
+    enabled: true
+    locations: classpath:db/migration
+
+  kafka:
+    bootstrap-servers: ${SPRING_KAFKA_BOOTSTRAP_SERVERS:localhost:9092}
+
+server:
+  port: ${SERVER_PORT:8082}
+  shutdown: graceful
+
+clothflow:
+  kafka:
+    topics:
+      inventory-events: inventory-events
+
+  outbox:
+    publisher:
+      enabled: true
+      fixed-delay-ms: 5000
+      recovery-delay-ms: 30000
+
+    retry:
+      base-delay-seconds: 5
+      max-delay-seconds: 300
+      max-attempts: 5
+
+management:
+  endpoints:
+    web:
+      exposure:
+        include: health,info,prometheus
+
+  endpoint:
+    health:
+      show-details: never
+      probes:
+        enabled: true
+
+logging:
+  pattern:
+    console: "%d{yyyy-MM-dd'T'HH:mm:ss.SSSXXX} %-5level [%X{correlationId:-}] %logger{36} - %msg%n"

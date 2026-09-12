@@ -1,0 +1,71 @@
+spring:
+  application:
+    name: product-service
+
+  datasource:
+    url: jdbc:postgresql://${DB_HOST:localhost}:${DB_PORT:7001}/${DB_NAME:clothflow}
+    username: ${DB_USERNAME:clothflow_admin}
+    password: ${DB_PASSWORD:floci-6201e1f5cf524b379ec1907e17e56d45}
+
+  jpa:
+    hibernate:
+      ddl-auto: validate
+    open-in-view: false
+    properties:
+      hibernate:
+        format_sql: true
+
+  flyway:
+    enabled: true
+
+  lifecycle:
+    timeout-per-shutdown-phase: 20s
+
+  security:
+    oauth2:
+      resourceserver:
+        jwt:
+          jwk-set-uri: ${JWT_JWK_SET_URI:http://floci:8081/.well-known/jwks.json}
+          issuer-uri: ${JWT_ISSUER:clothflow-user-service}
+          audiences:
+            - ${JWT_AUDIENCE:clothflow-api}
+
+server:
+  port: 8080
+  shutdown: graceful
+
+management:
+  endpoints:
+    web:
+      exposure:
+        include: health,info,prometheus
+
+  endpoint:
+    health:
+      probes:
+        enabled: true
+      show-details: never
+
+  health:
+    livenessstate:
+      enabled: true
+    readinessstate:
+      enabled: true
+
+  info:
+    env:
+      enabled: true
+
+  metrics:
+    tags:
+      application: ${spring.application.name}
+
+info:
+  app:
+    name: ${spring.application.name}
+    description: ClothFlow Product Service
+    version: ${APP_VERSION:0.0.1}
+
+logging:
+  pattern:
+    console: "%d{yyyy-MM-dd'T'HH:mm:ss.SSSXXX} %-5level [%X{correlationId:-}] %logger{36} - %msg%n"

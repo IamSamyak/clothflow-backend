@@ -1,0 +1,137 @@
+server:
+  port: 8081
+
+spring:
+  application:
+    name: user-service
+
+  datasource:
+    url: ${SPRING_DATASOURCE_URL}
+    username: ${SPRING_DATASOURCE_USERNAME}
+    password: ${SPRING_DATASOURCE_PASSWORD}
+
+  jpa:
+    open-in-view: false
+
+    hibernate:
+      ddl-auto: validate
+
+  flyway:
+    enabled: true
+
+  data:
+    redis:
+      host: ${SPRING_DATA_REDIS_HOST:localhost}
+      port: ${SPRING_DATA_REDIS_PORT:6379}
+      timeout: ${SPRING_DATA_REDIS_TIMEOUT:500ms}
+
+  kafka:
+    bootstrap-servers: ${SPRING_KAFKA_BOOTSTRAP_SERVERS:localhost:9092}
+
+    producer:
+      key-serializer: org.apache.kafka.common.serialization.StringSerializer
+      value-serializer: org.apache.kafka.common.serialization.StringSerializer
+
+      acks: all
+      enable-idempotence: true
+      retries: 10
+      properties:
+        max.in.flight.requests.per.connection: 5
+
+jwt:
+  issuer: ${JWT_ISSUER:clothflow-user-service}
+  audience: ${JWT_AUDIENCE:clothflow-api}
+
+  key-source: ${JWT_KEY_SOURCE:local}
+  key-secret-id: ${JWT_KEY_SECRET_ID:}
+
+  current-key-id: ${JWT_CURRENT_KEY_ID:clothflow-key-2026-09}
+
+  access-token-expiration: ${JWT_ACCESS_TOKEN_EXPIRATION:900}
+  refresh-token-expiration: ${JWT_REFRESH_TOKEN_EXPIRATION:2592000}
+  clock-skew-seconds: ${JWT_CLOCK_SKEW_SECONDS:30}
+
+  keys:
+    - key-id: ${JWT_KEY_1_ID:clothflow-key-2026-09}
+      private-key: ${JWT_KEY_1_PRIVATE_KEY}
+      public-key: ${JWT_KEY_1_PUBLIC_KEY}
+
+    - key-id: ${JWT_KEY_2_ID:clothflow-key-2026-10}
+      private-key: ${JWT_KEY_2_PRIVATE_KEY:}
+      public-key: ${JWT_KEY_2_PUBLIC_KEY}
+
+password-reset:
+  token-expiration: ${PASSWORD_RESET_TOKEN_EXPIRATION:900}
+
+outbox:
+  publisher:
+    fixed-delay: ${OUTBOX_PUBLISHER_FIXED_DELAY:1000}
+    batch-size: ${OUTBOX_PUBLISHER_BATCH_SIZE:50}
+    processing-timeout-seconds: ${OUTBOX_PROCESSING_TIMEOUT_SECONDS:60}
+    max-retries: ${OUTBOX_MAX_RETRIES:5}
+    initial-backoff-ms: ${OUTBOX_INITIAL_BACKOFF_MS:1000}
+    max-backoff-ms: ${OUTBOX_MAX_BACKOFF_MS:30000}
+
+    retention:
+      password-reset-days: ${OUTBOX_PASSWORD_RESET_RETENTION_DAYS:1}
+      fixed-delay: ${OUTBOX_RETENTION_FIXED_DELAY:3600000}
+
+security:
+  encryption:
+    outbox:
+      key: ${OUTBOX_ENCRYPTION_KEY}
+
+  hsts:
+    enabled: ${SECURITY_HSTS_ENABLED:false}
+    max-age-seconds: ${SECURITY_HSTS_MAX_AGE_SECONDS:31536000}
+    include-subdomains: ${SECURITY_HSTS_INCLUDE_SUBDOMAINS:true}
+    preload: ${SECURITY_HSTS_PRELOAD:false}
+
+  cors:
+    enabled: ${SECURITY_CORS_ENABLED:false}
+    allowed-origins: ${SECURITY_CORS_ALLOWED_ORIGINS:}
+    allowed-methods: ${SECURITY_CORS_ALLOWED_METHODS:GET,POST,PATCH,PUT,DELETE,OPTIONS}
+    allowed-headers: ${SECURITY_CORS_ALLOWED_HEADERS:Authorization,Content-Type,X-Correlation-Id}
+    exposed-headers: ${SECURITY_CORS_EXPOSED_HEADERS:X-Correlation-Id}
+    allow-credentials: ${SECURITY_CORS_ALLOW_CREDENTIALS:false}
+    max-age-seconds: ${SECURITY_CORS_MAX_AGE_SECONDS:3600}
+
+service-clients:
+  clients:
+    - client-id: ${ORDER_SERVICE_CLIENT_ID:}
+      client-secret: ${ORDER_SERVICE_CLIENT_SECRET:}
+      service-name: order-service
+
+    - client-id: ${PAYMENT_SERVICE_CLIENT_ID:}
+      client-secret: ${PAYMENT_SERVICE_CLIENT_SECRET:}
+      service-name: payment-service
+
+    - client-id: ${SHIPPING_SERVICE_CLIENT_ID:}
+      client-secret: ${SHIPPING_SERVICE_CLIENT_SECRET:}
+      service-name: shipping-service
+
+management:
+  endpoints:
+    web:
+      exposure:
+        include: health,info,prometheus
+
+  endpoint:
+    health:
+      probes:
+        enabled: true
+      show-details: never
+
+  health:
+    livenessstate:
+      enabled: true
+    readinessstate:
+      enabled: true
+
+  info:
+    env:
+      enabled: true
+
+  metrics:
+    tags:
+      application: ${spring.application.name}

@@ -1,5 +1,22 @@
+# IDE
+.idea/
+*.iml
+
+# Java / Maven
+**/target/
+*.class
+
+# Spring
+**/application-local.yml
+**/application-local.yaml
+
+# Environment / secrets
+.env
+.env.*
+!.env.example
+
 # Terraform
-.terraform/
+**/.terraform/
 *.tfstate
 *.tfstate.*
 *.tfvars
@@ -7,9 +24,8 @@
 crash.log
 crash.*.log
 
-# IDE
-.idea/
-*.iml
+# Local artifacts
+*.zip
 
 # OS
 .DS_Store
