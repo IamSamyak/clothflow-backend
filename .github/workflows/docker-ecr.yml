@@ -1,0 +1,323 @@
+name: ClothFlow Docker Build and ECR Push
+
+on:
+  push:
+    branches:
+      - main
+
+permissions:
+  contents: read
+
+env:
+  AWS_REGION: us-east-1
+
+jobs:
+
+  # ============================================================
+  # Detect which microservices changed
+  # ============================================================
+  detect-changes:
+    name: Detect changed services
+    runs-on: ubuntu-latest
+
+    outputs:
+      services: ${{ steps.services.outputs.services }}
+
+    steps:
+
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Detect changed paths
+        id: filter
+        uses: dorny/paths-filter@v3
+        with:
+          filters: |
+            product:
+              - 'product-service/**'
+
+            user:
+              - 'user-service/**'
+
+            inventory:
+              - 'inventory-service/**'
+
+            order:
+              - 'order-service/**'
+
+            payment:
+              - 'payment-service/**'
+
+            shipping:
+              - 'shipping-service/**'
+
+            notification:
+              - 'notification-service/**'
+
+      - name: Build service matrix
+        id: services
+        shell: bash
+        run: |
+
+          services=()
+
+          if [[ "${{ steps.filter.outputs.product }}" == "true" ]]; then
+            services+=("product-service")
+          fi
+
+          if [[ "${{ steps.filter.outputs.user }}" == "true" ]]; then
+            services+=("user-service")
+          fi
+
+          if [[ "${{ steps.filter.outputs.inventory }}" == "true" ]]; then
+            services+=("inventory-service")
+          fi
+
+          if [[ "${{ steps.filter.outputs.order }}" == "true" ]]; then
+            services+=("order-service")
+          fi
+
+          if [[ "${{ steps.filter.outputs.payment }}" == "true" ]]; then
+            services+=("payment-service")
+          fi
+
+          if [[ "${{ steps.filter.outputs.shipping }}" == "true" ]]; then
+            services+=("shipping-service")
+          fi
+
+          if [[ "${{ steps.filter.outputs.notification }}" == "true" ]]; then
+            services+=("notification-service")
+          fi
+
+          if [[ ${#services[@]} -eq 0 ]]; then
+            echo 'services=[]' >> "$GITHUB_OUTPUT"
+            echo "No service changes detected."
+            exit 0
+          fi
+
+          json=$(printf '%s\n' "${services[@]}" | jq -R . | jq -sc .)
+
+          echo "services=$json" >> "$GITHUB_OUTPUT"
+
+          echo "Changed services:"
+          echo "$json"
+
+
+  # ============================================================
+  # Build + Push changed services
+  # ============================================================
+  docker-ecr:
+    name: Docker → ECR
+    needs: detect-changes
+
+    if: needs.detect-changes.outputs.services != '[]'
+
+    runs-on: ubuntu-latest
+
+    strategy:
+      fail-fast: false
+
+      matrix:
+        service: ${{ fromJson(needs.detect-changes.outputs.services) }}
+
+    permissions:
+      contents: read
+      id-token: write
+
+    steps:
+
+      # --------------------------------------------------------
+      # Checkout
+      # --------------------------------------------------------
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+
+      # --------------------------------------------------------
+      # Java 21
+      # --------------------------------------------------------
+      - name: Set up Java
+        uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: "21"
+          cache: maven
+
+
+      # --------------------------------------------------------
+      # Build Spring Boot application
+      # --------------------------------------------------------
+      - name: Build application
+        working-directory: ${{ matrix.service }}
+        run: |
+          ./mvnw -B package -DskipTests
+
+
+      # --------------------------------------------------------
+      # Read Maven version
+      # --------------------------------------------------------
+      - name: Read service version
+        id: version
+        working-directory: ${{ matrix.service }}
+        shell: bash
+        run: |
+
+          VERSION=$(./mvnw -q \
+            -Dexpression=project.version \
+            -DforceStdout \
+            help:evaluate)
+
+          echo "Service: ${{ matrix.service }}"
+          echo "Version: $VERSION"
+
+          # No SNAPSHOT releases
+          if [[ "$VERSION" == *"-SNAPSHOT" ]]; then
+            echo "::error::SNAPSHOT versions are not allowed for ECR releases."
+            exit 1
+          fi
+
+          # Enforce MAJOR.MINOR.PATCH
+          if [[ ! "$VERSION" =~ ^[0-9]+\.[0-9]+\.[0-9]+$ ]]; then
+            echo "::error::Invalid release version: $VERSION"
+            echo "::error::Expected MAJOR.MINOR.PATCH"
+            exit 1
+          fi
+
+          echo "version=$VERSION" >> "$GITHUB_OUTPUT"
+
+
+      # --------------------------------------------------------
+      # Authenticate GitHub → AWS using OIDC
+      # --------------------------------------------------------
+      - name: Configure AWS credentials
+        uses: aws-actions/configure-aws-credentials@v5
+        with:
+          role-to-assume: ${{ vars.AWS_GITHUB_ACTIONS_ROLE_ARN }}
+          aws-region: ${{ env.AWS_REGION }}
+
+
+      # --------------------------------------------------------
+      # Verify AWS identity
+      # --------------------------------------------------------
+      - name: Resolve AWS account
+        id: account
+        shell: bash
+        run: |
+
+          ACCOUNT_ID=$(aws sts get-caller-identity \
+            --query Account \
+            --output text)
+
+          echo "AWS account: $ACCOUNT_ID"
+
+          echo "account_id=$ACCOUNT_ID" >> "$GITHUB_OUTPUT"
+
+
+      # --------------------------------------------------------
+      # Login to ECR
+      # --------------------------------------------------------
+      - name: Login to Amazon ECR
+        id: ecr-login
+        uses: aws-actions/amazon-ecr-login@v2
+
+
+      # --------------------------------------------------------
+      # Resolve ECR repository
+      # --------------------------------------------------------
+      - name: Resolve ECR repository
+        id: ecr
+        shell: bash
+        run: |
+
+          REPOSITORY="clothflow/${{ matrix.service }}"
+
+          echo "Repository: $REPOSITORY"
+
+          aws ecr describe-repositories \
+            --repository-names "$REPOSITORY" \
+            --region "$AWS_REGION"
+
+          echo "repository=$REPOSITORY" >> "$GITHUB_OUTPUT"
+
+
+      # --------------------------------------------------------
+      # Protect immutable release tags
+      # --------------------------------------------------------
+      - name: Verify release tag is unused
+        shell: bash
+        env:
+          VERSION: ${{ steps.version.outputs.version }}
+          REPOSITORY: ${{ steps.ecr.outputs.repository }}
+        run: |
+
+          echo "Checking ECR tag: $VERSION"
+
+          if aws ecr describe-images \
+            --repository-name "$REPOSITORY" \
+            --image-ids imageTag="$VERSION" \
+            --region "$AWS_REGION" \
+            >/dev/null 2>&1; then
+
+            echo "::error::ECR tag $VERSION already exists in $REPOSITORY."
+            echo "::error::Immutable release policy prevents tag reuse."
+
+            exit 1
+          fi
+
+          echo "ECR tag $VERSION is available."
+
+
+      # --------------------------------------------------------
+      # Build Docker image
+      # --------------------------------------------------------
+      - name: Build Docker image
+        working-directory: ${{ matrix.service }}
+        env:
+          REGISTRY: ${{ steps.ecr-login.outputs.registry }}
+          REPOSITORY: ${{ steps.ecr.outputs.repository }}
+          VERSION: ${{ steps.version.outputs.version }}
+        run: |
+
+          IMAGE="$REGISTRY/$REPOSITORY:$VERSION"
+
+          echo "Building:"
+          echo "$IMAGE"
+
+          docker build \
+            --tag "$IMAGE" \
+            .
+
+
+      # --------------------------------------------------------
+      # Push Docker image
+      # --------------------------------------------------------
+      - name: Push Docker image
+        env:
+          REGISTRY: ${{ steps.ecr-login.outputs.registry }}
+          REPOSITORY: ${{ steps.ecr.outputs.repository }}
+          VERSION: ${{ steps.version.outputs.version }}
+        run: |
+
+          IMAGE="$REGISTRY/$REPOSITORY:$VERSION"
+
+          echo "Pushing:"
+          echo "$IMAGE"
+
+          docker push "$IMAGE"
+
+
+      # --------------------------------------------------------
+      # Verify image exists in ECR
+      # --------------------------------------------------------
+      - name: Verify ECR image
+        env:
+          REPOSITORY: ${{ steps.ecr.outputs.repository }}
+          VERSION: ${{ steps.version.outputs.version }}
+        run: |
+
+          aws ecr describe-images \
+            --repository-name "$REPOSITORY" \
+            --image-ids imageTag="$VERSION" \
+            --region "$AWS_REGION" \
+            --query 'imageDetails[0].{digest:imageDigest,tags:imageTags,pushed:imagePushedAt}' \
+            --output table
